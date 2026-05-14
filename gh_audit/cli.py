@@ -1,4 +1,4 @@
-# gh_audit/cli.py
+# gh_audit/cli.py (fixed version)
 """Main CLI entry point using Click with comprehensive command-line options."""
 
 import os
@@ -24,8 +24,13 @@ from gh_audit.fixers.auto_fix import AutoFixer
 from gh_audit.reporters.html_reporter import HTMLReporter
 from gh_audit.reporters.json_reporter import JSONReporter
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from .env file if it exists
+env_path = Path(".env")
+if env_path.exists():
+    try:
+        load_dotenv()
+    except Exception:
+        pass
 
 console = Console()
 
@@ -120,7 +125,7 @@ class CLIState:
     help="GitHub Enterprise Server URL (if using GH Enterprise)"
 )
 @click.version_option(version="1.0.0", prog_name="gh-security-auditor")
-def main(
+def cli(
     org: str,
     token: Optional[str],
     fix: bool,
@@ -261,8 +266,10 @@ async def _run_audit(state: CLIState):
     
     # Aggregate results
     for repo_name, findings_list, score in results:
-        all_findings.extend(findings_list)
-        org_scores[repo_name] = score
+        if findings_list:  # Only add if findings exist
+            all_findings.extend(findings_list)
+        if score is not None:
+            org_scores[repo_name] = score
     
     # Display summary
     _display_summary(all_findings, org_scores, state)
@@ -283,10 +290,11 @@ async def _scan_single_repository(
     dependency_scanner: DependencyScanner,
     config_scanner: ConfigScanner,
     state: CLIState
-) -> Tuple[str, List, dict]:
+) -> Tuple[str, List, int]:
     """Scan a single repository with all scanners."""
     
     findings = []
+    config_score = 0
     
     if state.verbose:
         console.print(f"[dim]Scanning: {repo_name}[/dim]")
@@ -294,7 +302,8 @@ async def _scan_single_repository(
     # Secret scanning
     try:
         secret_findings = await secret_scanner.scan_repository(repo_name)
-        findings.extend(secret_findings)
+        if secret_findings:
+            findings.extend(secret_findings)
     except Exception as e:
         if state.verbose:
             console.print(f"[red]Secret scan failed for {repo_name}: {e}[/red]")
@@ -302,22 +311,25 @@ async def _scan_single_repository(
     # Dependency scanning
     try:
         dep_findings = await dependency_scanner.scan_repository(repo_name)
-        findings.extend(dep_findings)
+        if dep_findings:
+            findings.extend(dep_findings)
     except Exception as e:
         if state.verbose:
             console.print(f"[red]Dependency scan failed for {repo_name}: {e}[/red]")
     
     # Config scanning
     try:
-        config_score = await config_scanner.scan_repository(repo_name)
+        config_result = await config_scanner.scan_repository(repo_name)
+        config_score = config_result.get("score", 0)
+        config_findings = config_result.get("findings", [])
+        if config_findings:
+            findings.extend(config_findings)
     except Exception as e:
-        config_score = {"score": 0, "findings": []}
+        config_score = 0
         if state.verbose:
             console.print(f"[red]Config scan failed for {repo_name}: {e}[/red]")
     
-    findings.extend(config_score.get("findings", []))
-    
-    return (repo_name, findings, config_score.get("score", 0))
+    return (repo_name, findings, config_score)
 
 
 def _display_banner():
@@ -334,13 +346,18 @@ def _display_banner():
 def _display_summary(findings: List, org_scores: dict, state: CLIState):
     """Display scan summary table."""
     
+    if not org_scores:
+        console.print("[yellow]No repositories were successfully scanned[/yellow]")
+        return
+    
     table = Table(title="Audit Summary", style="bold")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="white")
     
     table.add_row("Total Findings", str(len(findings)))
     table.add_row("Repositories Scanned", str(len(org_scores)))
-    table.add_row("Average Security Score", f"{sum(org_scores.values()) / len(org_scores):.1f}/100")
+    avg_score = sum(org_scores.values()) / len(org_scores) if org_scores else 0
+    table.add_row("Average Security Score", f"{avg_score:.1f}/100")
     table.add_row("Auto-fix Enabled", "✓" if state.fix else "✗")
     table.add_row("Interactive Mode", "✓" if state.interactive else "✗")
     
@@ -389,6 +406,10 @@ async def _generate_reports(findings: List, org_scores: dict, state: CLIState):
         json_path = f"security_audit_{org_name_safe}_{timestamp}.json"
         json_reporter.generate(findings, org_scores, json_path, state.org)
         console.print(f"[green]✓ JSON report generated: {json_path}[/green]")
+
+
+# Export the main function
+main = cli
 
 
 if __name__ == "__main__":
